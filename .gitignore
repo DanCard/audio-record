@@ -1,0 +1,11 @@
+# Audio recordings
+*.m4a
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.aac
+
+# Temporary files
+*.tmp
+*~
