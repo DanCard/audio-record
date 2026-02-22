@@ -107,7 +107,7 @@ echo "------------------------------------------------"
 ffmpeg -stats -y \
   -f pulse -i "${VIRTUAL_SINK}.monitor" \
   -f pulse -i "echocancel_source" \
-  -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest" \
+  -filter_complex "[0:a]volume=6.0[remote];[1:a]volume=8.0[mic];[remote][mic]amix=inputs=2:duration=longest:normalize=0[mixed];[mixed]loudnorm=I=-16:TP=-1.5:LRA=11" \
   -c:a aac -b:a 192k \
   -ac 2 \
   -t 02:30:00 \
