@@ -6,6 +6,9 @@
 *.ogg
 *.aac
 
+# Meeting transcripts
+*.txt
+
 # Temporary files
 *.tmp
 *~

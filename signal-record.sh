@@ -25,6 +25,8 @@
 # USAGE:
 #   signal-record.sh [name]    # Start a Signal call first, then run this
 #   signal-record.sh anti-drone-weekly
+#   signal-record.sh --self-test [name]
+#   signal-record.sh --self-test --self-test-seconds 20
 #   Press 'q' or Ctrl+C to stop recording
 #
 # REQUIRES: PipeWire, PulseAudio compatibility layer, ffmpeg
@@ -44,6 +46,17 @@
 #   v1.5  2026-03-01  Simplified filter chain to fix poor quality/low volume.
 #                     - Removed dynaudnorm and explicit pan/volume filters.
 #                     - Reverted to simple amix=normalize=0 to match record-call.sh.
+#   v1.6  2026-03-04  Fix weak output + channel imbalance in Signal-isolated path.
+#                     - Force balanced stereo by duplicating the mixed left channel.
+#                     - Add controlled post-mix gain (default +12 dB, env overridable).
+#                     - Add limiter to reduce clipping risk after gain.
+#   v1.7  2026-03-04  Add deterministic self-test mode for no-meeting validation.
+#                     - `--self-test` generates calibration audio (no Signal call needed).
+#                     - Runs through same mix/filter/encoder chain.
+#                     - Prints PASS/FAIL for loudness and channel balance.
+#   v1.8  2026-03-06  Fix low volume to match record-call.sh levels.
+#                     - Increased default gain from 12 dB to 22 dB based on actual measurements.
+#                     - Signal recordings now ~-25 dB mean (same as record-call.sh).
 
 # --- Hardware-specific device names (from `pactl list short sinks/sources`) ---
 SPEAKER="alsa_output.pci-0000_c6_00.6.analog-stereo"          # Built-in speakers
@@ -51,8 +64,83 @@ ORIGINAL_MIC="alsa_input.usb-EMEET_HD_Webcam_eMeet_C950_A230803002402311-02.anal
 SIGNAL_NODE="ringrtc"       # Signal's WebRTC audio output node name in PipeWire
 VIRTUAL_SINK="signal_sink"  # Name for the virtual sink we create
 
+# Tunable output gain for Signal-isolated recordings (override per run if needed):
+#   SIGNAL_MIX_GAIN_DB=10 signal-record.sh
+SIGNAL_MIX_GAIN_DB="${SIGNAL_MIX_GAIN_DB:-22}"
+# Self-test recording length in seconds (override per run if needed):
+#   SIGNAL_SELF_TEST_SECONDS=30 signal-record.sh --self-test
+SIGNAL_SELF_TEST_SECONDS="${SIGNAL_SELF_TEST_SECONDS:-25}"
+
+usage() {
+    cat <<EOF
+Usage:
+  $(basename "$0") [name]
+  $(basename "$0") --self-test [name]
+  $(basename "$0") --self-test --self-test-seconds N [name]
+
+Options:
+  --self-test              Run deterministic test without a live Signal call
+  --self-test-seconds N    Self-test duration in seconds (default: ${SIGNAL_SELF_TEST_SECONDS})
+  -h, --help               Show this help
+
+Environment:
+  SIGNAL_MIX_GAIN_DB       Post-mix gain in dB (default: ${SIGNAL_MIX_GAIN_DB})
+  SIGNAL_SELF_TEST_SECONDS Default self-test duration
+EOF
+}
+
+SELF_TEST=0
+SELF_TEST_SECONDS="$SIGNAL_SELF_TEST_SECONDS"
+NAME=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --self-test)
+            SELF_TEST=1
+            shift
+            ;;
+        --self-test-seconds)
+            if [ -z "${2:-}" ]; then
+                echo "ERROR: --self-test-seconds requires a value."
+                exit 1
+            fi
+            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "ERROR: --self-test-seconds must be an integer."
+                exit 1
+            fi
+            SELF_TEST_SECONDS="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -*)
+            echo "ERROR: Unknown option: $1"
+            usage
+            exit 1
+            ;;
+        *)
+            if [ -n "$NAME" ]; then
+                echo "ERROR: Only one optional recording name is supported."
+                usage
+                exit 1
+            fi
+            NAME="$1"
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$NAME" ]; then
+    if [ "$SELF_TEST" -eq 1 ]; then
+        NAME="signal-selftest"
+    else
+        NAME="signal-call"
+    fi
+fi
+
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-NAME=${1:-signal-call}
 OUTFILE="${NAME}-${TIMESTAMP}.m4a"
 
 # Track what we set up so cleanup only undoes what we did
@@ -91,6 +179,83 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+print_self_test_report() {
+    local mean max ch0_mean ch1_mean balance_diff
+    local loudness_ok balance_ok
+    local num_re='^-?[0-9]+([.][0-9]+)?$'
+
+    mean=$(ffmpeg -hide_banner -i "$OUTFILE" -af volumedetect -f null - 2>&1 | awk -F': ' '/mean_volume/ {print $2}' | awk '{print $1}' | head -n1)
+    max=$(ffmpeg -hide_banner -i "$OUTFILE" -af volumedetect -f null - 2>&1 | awk -F': ' '/max_volume/ {print $2}' | awk '{print $1}' | head -n1)
+    ch0_mean=$(ffmpeg -hide_banner -i "$OUTFILE" -af "pan=mono|c0=c0,volumedetect" -f null - 2>&1 | awk -F': ' '/mean_volume/ {print $2}' | awk '{print $1}' | head -n1)
+    ch1_mean=$(ffmpeg -hide_banner -i "$OUTFILE" -af "pan=mono|c0=c1,volumedetect" -f null - 2>&1 | awk -F': ' '/mean_volume/ {print $2}' | awk '{print $1}' | head -n1)
+    if ! [[ "$mean" =~ $num_re ]] || ! [[ "$max" =~ $num_re ]] || ! [[ "$ch0_mean" =~ $num_re ]] || ! [[ "$ch1_mean" =~ $num_re ]]; then
+        echo "------------------------------------------------"
+        echo "SELF-TEST REPORT"
+        echo "File: $OUTFILE"
+        echo "SELF-TEST RESULT    : FAIL (unable to parse loudness metrics)"
+        echo "------------------------------------------------"
+        return 1
+    fi
+
+    balance_diff=$(awk -v a="$ch0_mean" -v b="$ch1_mean" 'BEGIN {d=a-b; if (d<0) d=-d; printf "%.2f", d}')
+
+    loudness_ok=$(awk -v m="$mean" 'BEGIN {if (m >= -40.0) print "yes"; else print "no"}')
+    balance_ok=$(awk -v d="$balance_diff" 'BEGIN {if (d <= 3.0) print "yes"; else print "no"}')
+
+    echo "------------------------------------------------"
+    echo "SELF-TEST REPORT"
+    echo "File: $OUTFILE"
+    echo "Overall mean volume : ${mean} dB"
+    echo "Overall max volume  : ${max} dB"
+    echo "Channel mean (L/R)  : ${ch0_mean} dB / ${ch1_mean} dB"
+    echo "Channel delta       : ${balance_diff} dB"
+
+    if [ "$loudness_ok" = "yes" ]; then
+        echo "Loudness check      : PASS (target mean >= -40 dB)"
+    else
+        echo "Loudness check      : FAIL (target mean >= -40 dB)"
+    fi
+
+    if [ "$balance_ok" = "yes" ]; then
+        echo "Balance check       : PASS (target L/R delta <= 3 dB)"
+    else
+        echo "Balance check       : FAIL (target L/R delta <= 3 dB)"
+    fi
+
+    if [ "$loudness_ok" = "yes" ] && [ "$balance_ok" = "yes" ]; then
+        echo "SELF-TEST RESULT    : PASS"
+    else
+        echo "SELF-TEST RESULT    : FAIL"
+        echo "Tip: try SIGNAL_MIX_GAIN_DB=14 for another run if loudness failed."
+    fi
+    echo "------------------------------------------------"
+}
+
+MIX_FILTER="[0:a][1:a]amix=inputs=2:duration=longest:normalize=0,volume=${SIGNAL_MIX_GAIN_DB}dB,alimiter=limit=0.95,pan=stereo|c0=c0|c1=c0"
+
+if [ "$SELF_TEST" -eq 1 ]; then
+    echo "------------------------------------------------"
+    echo "SELF-TEST STARTED (no Signal call needed)"
+    echo "Output: $OUTFILE"
+    echo "Duration: ${SELF_TEST_SECONDS}s"
+    echo "------------------------------------------------"
+
+    # Self-test inputs:
+    #   input 0 = deterministic calibration tone (left only, to verify L/R fix)
+    #   input 1 = silence (acts as mic path placeholder)
+    ffmpeg -stats -y \
+      -f lavfi -i "aevalsrc=0.06*sin(2*PI*997*t)|0:s=48000" \
+      -f lavfi -i "anullsrc=r=48000:cl=mono" \
+      -filter_complex "$MIX_FILTER" \
+      -c:a aac -b:a 192k \
+      -ac 2 \
+      -t "$SELF_TEST_SECONDS" \
+      "$OUTFILE"
+
+    print_self_test_report
+    exit 0
+fi
 
 # --- Verify Signal is running ---
 # pw-link -o lists all PipeWire output ports; ringrtc only exists during a call
@@ -168,27 +333,10 @@ echo "Press 'q' or Ctrl+C to stop."
 echo "------------------------------------------------"
 
 # --- Record: Signal audio (virtual sink monitor) + your mic ---
-# ffmpeg flags:
-#   -stats        = show progress (time, size) during recording
-#   -y            = overwrite output file without asking
-#   -f pulse      = use PulseAudio as input format (works with PipeWire)
-#   -i "...monitor" = input 0: the virtual sink's monitor (Signal audio only)
-#   -i "echocancel_source" = input 1: echo-cancelled mic
-#   -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest"
-#       [0:a]     = first input (Signal audio)
-#       [1:a]     = second input (mic audio)
-#       amix      = mix both streams into one
-#       inputs=2  = two input streams
-#       normalize=0 = prevent amix from halving volume (default 1/N)
-#       duration=longest = keep recording until the longer stream ends
-#   -c:a aac      = encode as AAC audio codec
-#   -b:a 192k     = 192 kbps bitrate (good quality for voice)
-#   -ac 2         = stereo output
-#   -t 02:30:00   = max recording length 2.5 hours (safety limit)
 ffmpeg -stats -y \
   -f pulse -sample_rate 48000 -i "${VIRTUAL_SINK}.monitor" \
   -f pulse -sample_rate 48000 -i "echocancel_source" \
-  -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0" \
+  -filter_complex "$MIX_FILTER" \
   -c:a aac -b:a 192k \
   -ac 2 \
   -t 02:30:00 \
