@@ -8,7 +8,20 @@
 
 # Meeting transcripts
 *.txt
+*.json
 
 # Temporary files
 *.tmp
 *~
+
+# log files
+*.log
+
+# directories
+old/
+anti-drone/
+comms/
+drone-tech-weekly/
+exec-call/
+project-management-team/
+tech-onboarding/
