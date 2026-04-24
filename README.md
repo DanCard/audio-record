@@ -2,6 +2,12 @@
 
 Record Signal (or other) video calls on Linux with both system audio and microphone, using PulseAudio echo cancellation to prevent feedback.
 
+Canonical scripts:
+- `~/bin/record-call.sh`
+- `~/bin/signal-record.sh`
+
+This repo keeps notes, plans, and supporting material. The runnable `signal-record.sh` now lives only in `~/bin/`.
+
 ## Requirements
 
 - Linux with PulseAudio

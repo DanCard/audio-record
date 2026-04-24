@@ -14,7 +14,7 @@
   - runtime script differs from expected version,
   - gain loss is now occurring before/after mix stage,
   - or source capture levels differ in Signal-isolated path.
-- Repo scripts are byte-identical with runtime scripts in `~/bin` (`cmp` returned identical for both `signal-record.sh` and `record-call.sh`).
+- At the time of this investigation, repo scripts were byte-identical with the runtime scripts in `~/bin`.
 - Measured current samples:
   - `signal-call-20260304-080449.m4a`: mean `-51.2 dB`, max `-16.8 dB`
   - `call-20260304-080455.m4a`: mean `-30.1 dB`, max `-6.3 dB`
@@ -46,7 +46,7 @@
 ## Resources
 - `plans/260228-Fix-signal-record.sh-Audio-Quality.md`
 - `plans/260301-Fix-signal-record.sh-Audio-Quality.md`
-- `signal-record.sh`
+- `~/bin/signal-record.sh`
 - `record-call.sh`
 - `comms/signal-call-20260304-080449.m4a`
 - `comms/call-20260304-080455.m4a`
